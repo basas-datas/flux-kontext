@@ -1,0 +1,17 @@
+{
+    "title": "Flux_kontext_Runpod_hub",
+    "description": "FLUX.1 Kontext is a suite of generative flow matching models that allow you to generate and edit images.",
+    "type": "serverless",
+    "category": "image",
+  
+    "config": {
+      "runsOn": "GPU",
+      "containerDiskInGb": 40,
+  
+      "gpuCount": 1,
+      "gpuIds": "ADA_24,ADA_32_PRO",
+      "allowedCudaVersions": [
+        "12.8"
+      ]
+    }
+}
