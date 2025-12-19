@@ -1,7 +1,7 @@
 {
   "6": {
     "inputs": {
-      "text": "the anime girl with massive fennec ears is wearing cargo pants while sitting on a log in the woods biting into a sandwitch beside a beautiful alpine lake",
+      "text": "[photo content], remove overlays and reconstruct background naturally",
       "clip": [
         "11",
         0
@@ -112,7 +112,7 @@
   "17": {
     "inputs": {
       "scheduler": "simple",
-      "steps": 20,
+      "steps": 3,
       "denoise": 1,
       "model": [
         "30",
@@ -142,7 +142,7 @@
   },
   "25": {
     "inputs": {
-      "noise_seed": 679064953796969
+      "noise_seed": 42
     },
     "class_type": "RandomNoise",
     "_meta": {
@@ -151,7 +151,7 @@
   },
   "26": {
     "inputs": {
-      "guidance": 2.5,
+      "guidance": 1.2,
       "conditioning": [
         "6",
         0
