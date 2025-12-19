@@ -1,14 +1,17 @@
-import runpod
-from runpod.serverless.utils import rp_upload
-import os
-import websocket
 import base64
+import binascii  # Base64 에러 처리를 위해 import
+import io
 import json
-import uuid
 import logging
-import urllib.request
+import os
+import uuid
+
+import numpy as np
+import websocket
+from PIL import Image
 import urllib.parse
-import binascii # Base64 에러 처리를 위해 import
+import urllib.request
+import runpod
 
 
 # 로깅 설정
@@ -45,36 +48,71 @@ except Exception as e:
 
 server_address = os.getenv('SERVER_ADDRESS', '127.0.0.1')
 client_id = str(uuid.uuid4())
-def save_data_if_base64(data_input, temp_dir, output_filename):
-    """
-    입력 데이터가 Base64 문자열인지 확인하고, 맞다면 파일로 저장 후 경로를 반환합니다.
-    만약 일반 경로 문자열이라면 그대로 반환합니다.
-    """
-    # 입력값이 문자열이 아니면 그대로 반환
-    if not isinstance(data_input, str):
-        return data_input
+def remove_alpha_force_rgb(img: Image.Image) -> Image.Image:
+    if img.mode in ("P", "LA"):
+        img = img.convert("RGBA")
 
-    try:
-        # Base64 문자열은 디코딩을 시도하면 성공합니다.
-        decoded_data = base64.b64decode(data_input)
-        
-        # 디렉토리가 존재하지 않으면 생성
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        # 디코딩에 성공하면, 임시 파일로 저장합니다.
-        file_path = os.path.abspath(os.path.join(temp_dir, output_filename))
-        with open(file_path, 'wb') as f: # 바이너리 쓰기 모드('wb')로 저장
-            f.write(decoded_data)
-        
-        # 저장된 파일의 경로를 반환합니다.
-        print(f"✅ Base64 입력을 '{file_path}' 파일로 저장했습니다.")
-        return file_path
+    if img.mode == "RGBA":
+        arr = np.array(img, dtype=np.float32)
+        rgb = arr[..., :3]
+        a = arr[..., 3] / 255.0
 
-    except (binascii.Error, ValueError):
-        # 디코딩에 실패하면, 일반 경로로 간주하고 원래 값을 그대로 반환합니다.
-        print(f"➡️ '{data_input}'은(는) 파일 경로로 처리합니다.")
-        return data_input
-    
+        h, w = a.shape
+        border = np.zeros((h, w), dtype=bool)
+        border[0, :] = True
+        border[-1, :] = True
+        border[:, 0] = True
+        border[:, -1] = True
+
+        mask = border & (a > 0.1)
+        if mask.any():
+            bg = np.median(rgb[mask], axis=0)
+        else:
+            bg = np.array([255.0, 255.0, 255.0], dtype=np.float32)
+
+        comp = rgb * a[..., None] + bg[None, None, :] * (1.0 - a[..., None])
+        out = np.clip(comp, 0, 255).astype(np.uint8)
+        return Image.fromarray(out, mode="RGB")
+
+    return img.convert("RGB")
+
+
+def resize_max_side(img: Image.Image, max_side: int) -> Image.Image:
+    w, h = img.size
+    scale = min(max_side / max(w, h), 1.0)
+    if scale < 1.0:
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        return img.resize((new_w, new_h), Image.LANCZOS)
+    return img
+
+
+def normalize_input_image(image_input, task_id: str, max_size: int) -> tuple[str, tuple[int, int]]:
+    """Decode the user-provided image, normalize format, resize, and save to PNG."""
+
+    os.makedirs(task_id, exist_ok=True)
+    image_bytes = None
+
+    if isinstance(image_input, str):
+        cleaned_input = image_input.split(",")[-1]
+        try:
+            image_bytes = base64.b64decode(cleaned_input, validate=True)
+        except (binascii.Error, ValueError):
+            with open(image_input, "rb") as f:
+                image_bytes = f.read()
+    else:
+        raise ValueError("Image input must be a base64 string or a valid file path.")
+
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        rgb_image = remove_alpha_force_rgb(img)
+        target_max_side = min(max_size, max(rgb_image.size))
+        processed_image = resize_max_side(rgb_image, target_max_side)
+
+    image_path = os.path.abspath(os.path.join(task_id, "input_image.png"))
+    processed_image.save(image_path, format="PNG")
+    return image_path, processed_image.size
+
+
 def queue_prompt(prompt):
     url = f"http://{server_address}:8188/prompt"
     logger.info(f"Queueing prompt to: {url}")
@@ -137,25 +175,24 @@ def handler(job):
     logger.info(f"Received job input: {job_input}")
     task_id = f"task_{uuid.uuid4()}"
 
-    image_input = job_input["image_path"]
-    # 헬퍼 함수를 사용해 이미지 파일 경로 확보 (Base64 또는 Path)
-    # 이미지 확장자를 알 수 없으므로 .jpg로 가정하거나, 입력에서 받아야 합니다.
-    if image_input == "/example_image.png":
-        image_path = "/example_image.png"
-    else:
-        image_path = save_data_if_base64(image_input, task_id, "input_image.jpg")
-    
+    image_input = job_input["image"]
+    max_size = int(job_input["max_size"])
+
+    image_path, image_size = normalize_input_image(image_input, task_id, max_size)
 
     prompt = load_workflow("/flux_kontext_example.json")
 
     prompt["41"]["inputs"]["image"] = image_path
     prompt["6"]["inputs"]["text"] = job_input["prompt"]
     prompt["25"]["inputs"]["noise_seed"] = job_input["seed"]
-    prompt["26"]["inputs"]["guidance"] = job_input["guidance"]
-    prompt["27"]["inputs"]["width"] = job_input["width"]
-    prompt["27"]["inputs"]["height"] = job_input["height"]
-    prompt["30"]["inputs"]["width"] = job_input["width"]
-    prompt["30"]["inputs"]["height"] = job_input["height"]
+    prompt["26"]["inputs"]["guidance"] = job_input["guidance_scale"]
+    prompt["17"]["inputs"]["steps"] = job_input["steps"]
+
+    width, height = image_size
+    prompt["27"]["inputs"]["width"] = width
+    prompt["27"]["inputs"]["height"] = height
+    prompt["30"]["inputs"]["width"] = width
+    prompt["30"]["inputs"]["height"] = height
 
     ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
     logger.info(f"Connecting to WebSocket: {ws_url}")
